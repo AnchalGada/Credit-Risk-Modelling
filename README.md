@@ -1,5 +1,6 @@
 # 🏦 Credit Risk Scoring Model
 
+
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9+-blue?style=for-the-badge&logo=python"/>
   <img src="https://img.shields.io/badge/Machine%20Learning-XGBoost%20%7C%20LightGBM%20%7C%20RF-orange?style=for-the-badge"/>
