@@ -188,22 +188,26 @@ model, imputer, scaler, feature_columns, metadata, load_error = load_artifacts()
 # ─────────────────────────────────────────────────────────────
 
 def preprocess(df: pd.DataFrame) -> np.ndarray:
+
+    # 🔹 Step 1: Add missing columns
     for col in feature_columns:
         if col not in df.columns:
-            df[col] = np.nan
-    df = df[feature_columns].replace([np.inf, -np.inf], np.nan)
-    # Re-fit imputer fresh to avoid sklearn version mismatch
-    from sklearn.impute import SimpleImputer
-    fresh_imputer = SimpleImputer(strategy="median")
-    X_imp = pd.DataFrame(
-        fresh_imputer.fit_transform(df), columns=feature_columns
-    )
-    if metadata.get("needs_scaling", False):
-        from sklearn.preprocessing import StandardScaler
-        fresh_scaler = StandardScaler()
-        return fresh_scaler.fit_transform(X_imp)
-    return X_imp.values
+            df[col] = 0   # default value
 
+    # 🔹 Step 2: Ensure correct column order
+    df = df[feature_columns]
+
+    # 🔹 Step 3: Replace inf values
+    df = df.replace([np.inf, -np.inf], np.nan)
+
+    # 🔹 Step 4: Apply trained imputer
+    X_imp = pd.DataFrame(imputer.transform(df), columns=feature_columns)
+
+    # 🔹 Step 5: Apply scaling if required
+    if metadata.get("needs_scaling", False):
+        return scaler.transform(X_imp)
+
+    return X_imp.values
 
 def score_customer(customer: dict) -> dict:
     row   = pd.DataFrame([customer])
