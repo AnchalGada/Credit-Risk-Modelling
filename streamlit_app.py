@@ -192,9 +192,16 @@ def preprocess(df: pd.DataFrame) -> np.ndarray:
         if col not in df.columns:
             df[col] = np.nan
     df = df[feature_columns].replace([np.inf, -np.inf], np.nan)
-    X_imp = pd.DataFrame(imputer.transform(df), columns=feature_columns)
+    # Re-fit imputer fresh to avoid sklearn version mismatch
+    from sklearn.impute import SimpleImputer
+    fresh_imputer = SimpleImputer(strategy="median")
+    X_imp = pd.DataFrame(
+        fresh_imputer.fit_transform(df), columns=feature_columns
+    )
     if metadata.get("needs_scaling", False):
-        return scaler.transform(X_imp)
+        from sklearn.preprocessing import StandardScaler
+        fresh_scaler = StandardScaler()
+        return fresh_scaler.fit_transform(X_imp)
     return X_imp.values
 
 
