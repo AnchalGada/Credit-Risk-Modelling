@@ -442,7 +442,7 @@ if page == "Single Customer":
     st.markdown("""
     <div class="hero">
         <h1>🏦 Credit Risk Scorer</h1>
-        <p>Bank GoodCredit · PM-PR-0015 · Same model as Jupyter Notebook · Ensemble (XGB + LightGBM + RF)</p>
+       <p>Bank GoodCredit · Credit Risk Scoring Application</p>
     </div>""", unsafe_allow_html=True)
 
     with st.form("customer_form"):
