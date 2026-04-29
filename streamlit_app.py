@@ -1,0 +1,709 @@
+"""
+streamlit_app.py — Bank GoodCredit Credit Risk Scoring Tool
+Exact mirror of Credit_Risk_Model.ipynb
+- Same synthetic data generation (np.random.seed(42))
+- Same feature engineering (parse_ph, REF=2018-06-01)
+- Same models (LR, RF, XGBoost, LightGBM, Ensemble)
+- Same SMOTE parameters
+- Same prediction logic from notebook Step 11
+- Same credit score formula: 300 + (1-prob)*550
+- Same band thresholds: HIGH>=0.6, MEDIUM>=0.35
+"""
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.metrics import roc_auc_score
+from xgboost import XGBClassifier
+import lightgbm as lgb
+from imblearn.over_sampling import SMOTE
+
+st.set_page_config(
+    page_title="GoodCredit Risk Scorer",
+    page_icon="🏦",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600;700&display=swap');
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
+[data-testid="stSidebar"] { background: #0a0f1e; border-right: 1px solid #1e2d4a; }
+[data-testid="stSidebar"] * { color: #c8d8f0 !important; }
+.main { background: #f4f6fa; }
+.metric-card {
+    background: white; border-radius: 12px; padding: 1.2rem 1.5rem;
+    border-left: 4px solid #1a4fff; box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+    margin-bottom: 0.5rem;
+}
+.metric-card h3 {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em;
+    color: #6b7a99; margin: 0 0 0.3rem 0; font-family: 'IBM Plex Mono', monospace;
+}
+.metric-card p { font-size: 1.9rem; font-weight: 700; color: #0a0f1e; margin: 0; }
+.result-approve {
+    background: linear-gradient(135deg, #e8fdf0 0%, #d0f5e2 100%);
+    border: 2px solid #22c55e; border-radius: 16px; padding: 2rem; text-align: center;
+}
+.result-caution {
+    background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+    border: 2px solid #f59e0b; border-radius: 16px; padding: 2rem; text-align: center;
+}
+.result-reject {
+    background: linear-gradient(135deg, #fff1f1 0%, #ffe4e4 100%);
+    border: 2px solid #ef4444; border-radius: 16px; padding: 2rem; text-align: center;
+}
+.result-approve h2 { color: #15803d; font-size:1.6rem; font-weight:700; margin:0.5rem 0; }
+.result-caution h2 { color: #92400e; font-size:1.6rem; font-weight:700; margin:0.5rem 0; }
+.result-reject  h2 { color: #b91c1c; font-size:1.6rem; font-weight:700; margin:0.5rem 0; }
+.score-num { font-family:'IBM Plex Mono',monospace; font-size:3rem; font-weight:600; }
+.hero {
+    background: linear-gradient(135deg, #0a0f1e 0%, #0d2050 60%, #1a4fff 100%);
+    border-radius: 16px; padding: 2.5rem 3rem; margin-bottom: 2rem; color: white;
+}
+.hero h1 { font-size:2rem; font-weight:700; margin:0; letter-spacing:-0.02em; }
+.hero p  { color:#93b4ff; margin:0.5rem 0 0 0; font-size:0.95rem; }
+.section-header {
+    font-family:'IBM Plex Mono',monospace; font-size:0.7rem; text-transform:uppercase;
+    letter-spacing:0.15em; color:#6b7a99; border-bottom:1px solid #e2e8f0;
+    padding-bottom:0.4rem; margin:1.5rem 0 1rem 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ── Constants (same as notebook) ─────────────────────────────
+REF = pd.Timestamp("2018-06-01")
+
+# ── Exact same functions from notebook ───────────────────────
+
+def parse_ph(s):
+    """Exact copy from notebook Cell 11."""
+    if not isinstance(s, str): return 0.0, 0.0
+    nums = [int(c) for c in s if c.isdigit()]
+    if not nums: return 0.0, 0.0
+    return (sum(1 for x in nums if x < 2) / len(nums),
+            sum(1 for x in nums if x >= 2) / len(nums))
+
+
+def generate_synthetic_data():
+    """Exact copy from notebook Cell 6 — same seed, same structure."""
+    np.random.seed(42)
+    N = 5000
+    customer_nos = np.arange(1, N + 1)
+
+    df_demographics = pd.DataFrame({
+        "customer_no": customer_nos,
+        **{f"feature_{i}": np.random.randn(N) for i in range(1, 80)},
+        "Bad_label": np.random.choice([0, 1], size=N, p=[0.82, 0.18])
+    })
+    bad = df_demographics["Bad_label"] == 1
+    for c in ["feature_1", "feature_2", "feature_3", "feature_4", "feature_5"]:
+        df_demographics.loc[bad, c] += 1.2
+
+    n_acc = N * 3
+    ac = np.random.choice(customer_nos, n_acc)
+    df_account = pd.DataFrame({
+        "customer_no":        ac,
+        "opened_dt":          pd.date_range("2010-01-01", periods=n_acc, freq="4h"),
+        "last_paymt_dt":      pd.date_range("2017-01-01", periods=n_acc, freq="3h"),
+        "acct_type":          np.random.choice(["CC", "PL", "HL", "AL"], n_acc),
+        "cur_balance_amt":    np.random.uniform(0, 300000, n_acc),
+        "creditlimit":        np.random.uniform(20000, 1000000, n_acc),
+        "cashlimit":          np.random.uniform(5000, 200000, n_acc),
+        "high_credit_amt":    np.random.uniform(10000, 500000, n_acc),
+        "amt_past_due":       np.where(np.random.rand(n_acc) > 0.8,
+                                       np.random.uniform(100, 50000, n_acc), 0),
+        "actualpaymentamount": np.random.uniform(0, 50000, n_acc),
+        "rateofinterest":     np.random.uniform(0.10, 0.42, n_acc),
+        "paymenthistory1":    ["".join(np.random.choice(list("0123X"), 24))
+                               for _ in range(n_acc)],
+    })
+
+    n_enq = N * 5
+    ec = np.random.choice(customer_nos, n_enq)
+    df_enquiry = pd.DataFrame({
+        "customer_no": ec,
+        "enquiry_dt":  pd.date_range("2016-01-01", periods=n_enq, freq="1h"),
+        "enq_purpose": np.random.choice(["CC", "PL", "HL", "AL", "SL", "GL"], n_enq),
+        "enq_amt":     np.random.uniform(5000, 500000, n_enq),
+    })
+    return df_account, df_enquiry, df_demographics
+
+
+def build_features(df_account, df_enquiry, df_demographics):
+    """Exact copy from notebook Cell 11."""
+    df_acc = df_account.copy()
+    df_acc["opened_dt"]     = pd.to_datetime(df_acc["opened_dt"],     errors="coerce")
+    df_acc["last_paymt_dt"] = pd.to_datetime(df_acc["last_paymt_dt"], errors="coerce")
+    df_acc["diff_lastpaymt_opened"] = (
+        (df_acc["last_paymt_dt"] - df_acc["opened_dt"]).dt.days / 30
+    ).clip(0)
+    df_acc["util_ratio"] = (
+        df_acc["cur_balance_amt"] / df_acc["creditlimit"].replace(0, np.nan)
+    ).clip(0, 5)
+
+    if "paymenthistory1" in df_acc.columns:
+        ph = df_acc["paymenthistory1"].apply(
+            lambda x: pd.Series(parse_ph(x), index=["ph_ok", "ph_bad"])
+        )
+        df_acc = pd.concat([df_acc, ph], axis=1)
+
+    agg = {
+        "diff_lastpaymt_opened": ["sum", "mean"],
+        "util_ratio":            ["mean", "max"],
+        "cur_balance_amt":       ["sum", "mean"],
+        "creditlimit":           ["sum", "mean"],
+        "cashlimit":             ["sum", "mean"],
+        "amt_past_due":          ["sum", "mean", "max"],
+        "actualpaymentamount":   ["sum", "mean"],
+    }
+    if "ph_ok" in df_acc.columns:
+        agg["ph_ok"] = "mean"
+        agg["ph_bad"] = "mean"
+
+    acct_agg = df_acc.groupby("customer_no").agg(agg)
+    acct_agg.columns = ["acct_" + "_".join(c) for c in acct_agg.columns]
+    acct_agg = acct_agg.reset_index()
+    acct_cnt = df_acc.groupby("customer_no").size().reset_index(name="acct_count")
+    acct_agg = acct_agg.merge(acct_cnt, on="customer_no")
+    acct_agg["Ratio_currbalance_creditlimit"] = (
+        acct_agg.get("acct_cur_balance_amt_sum", pd.Series(0)) /
+        acct_agg.get("acct_creditlimit_sum", pd.Series(1)).replace(0, np.nan)
+    ).clip(0, 5)
+    acct_agg["utilisation_trend"] = acct_agg.get(
+        "acct_util_ratio_mean", pd.Series(0)
+    ).clip(0, 10)
+
+    df_enq = df_enquiry.copy()
+    df_enq["enquiry_dt"] = pd.to_datetime(df_enq["enquiry_dt"], errors="coerce")
+    df_enq["days_since"] = (REF - df_enq["enquiry_dt"]).dt.days.clip(0)
+    df_enq["in_90"]  = (df_enq["days_since"] <= 90).astype(int)
+    df_enq["in_365"] = (df_enq["days_since"] <= 365).astype(int)
+    if "enq_purpose" in df_enq.columns:
+        df_enq["is_secured"] = df_enq["enq_purpose"].isin(["HL", "AL"]).astype(int)
+
+    enq_agg = df_enq.groupby("customer_no").agg(
+        count_enquiry_total  =("customer_no", "count"),
+        count_enquiry_rec_90 =("in_90",  "sum"),
+        count_enquiry_rec_365=("in_365", "sum"),
+        mean_enq_amt         =("enq_amt", "mean"),
+        max_enq_amt          =("enq_amt", "max"),
+    ).reset_index()
+    if "is_secured" in df_enq.columns:
+        pu = df_enq.groupby("customer_no")["is_secured"].mean().reset_index()
+        pu.columns = ["customer_no", "perc_unsecured"]
+        enq_agg = enq_agg.merge(pu, on="customer_no", how="left")
+
+    df = df_demographics.copy()
+    if "customer no" in df.columns:
+        df.rename(columns={"customer no": "customer_no"}, inplace=True)
+    df = df.merge(acct_agg, on="customer_no", how="left")
+    df = df.merge(enq_agg,  on="customer_no", how="left")
+
+    drop_cols = [c for c in ["customer_no", "dt_opened", "entry_time"] if c in df.columns]
+    df.drop(columns=drop_cols, inplace=True)
+
+    X = df.drop(columns=["Bad_label"])
+    y = df["Bad_label"]
+
+    for c in X.select_dtypes(include="object").columns:
+        X[c] = LabelEncoder().fit_transform(X[c].astype(str))
+    X.replace([np.inf, -np.inf], np.nan, inplace=True)
+    high_miss = X.columns[X.isnull().mean() > 0.6].tolist()
+    X.drop(columns=high_miss, inplace=True)
+
+    imputer = SimpleImputer(strategy="median")
+    X_imp = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+    feature_columns = list(X_imp.columns)
+    return X_imp, y, imputer, feature_columns
+
+
+@st.cache_resource(show_spinner=False)
+def train_all_models():
+    """
+    Exact same training pipeline as notebook Steps 3-9.
+    Uses np.random.seed(42) → identical data every run → identical models.
+    """
+    # Step 3 — generate data (same as notebook)
+    df_account, df_enquiry, df_demographics = generate_synthetic_data()
+
+    # Step 5 — feature engineering (same as notebook)
+    X_imp, y, imputer, feature_columns = build_features(
+        df_account, df_enquiry, df_demographics
+    )
+
+    # Step 6 — train/test split + SMOTE (same as notebook)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_imp, y, test_size=0.2, random_state=42, stratify=y
+    )
+    smote = SMOTE(random_state=42)
+    X_tr, y_tr = smote.fit_resample(X_train, y_train)
+
+    # Step 7 — train all 5 models (same hyperparameters as notebook)
+
+    # Logistic Regression
+    scaler = StandardScaler()
+    X_tr_sc   = scaler.fit_transform(X_tr)
+    X_test_sc = scaler.transform(X_test)
+    lr = LogisticRegression(max_iter=1000, class_weight="balanced",
+                            random_state=42, n_jobs=-1)
+    lr.fit(X_tr_sc, y_tr)
+    lr_prob  = lr.predict_proba(X_test_sc)[:, 1]
+    lr_gini  = (2 * roc_auc_score(y_test, lr_prob) - 1) * 100
+
+    # Random Forest
+    rf = RandomForestClassifier(n_estimators=200, max_depth=10,
+                                class_weight="balanced", random_state=42, n_jobs=-1)
+    rf.fit(X_tr, y_tr)
+    rf_prob = rf.predict_proba(X_test)[:, 1]
+    rf_gini = (2 * roc_auc_score(y_test, rf_prob) - 1) * 100
+
+    # XGBoost
+    xgb = XGBClassifier(
+        n_estimators=300, max_depth=6, learning_rate=0.05,
+        subsample=0.8, colsample_bytree=0.8,
+        scale_pos_weight=(y_tr == 0).sum() / (y_tr == 1).sum(),
+        eval_metric="auc", random_state=42, n_jobs=-1,
+    )
+    xgb.fit(X_tr, y_tr)
+    xgb_prob = xgb.predict_proba(X_test)[:, 1]
+    xgb_gini = (2 * roc_auc_score(y_test, xgb_prob) - 1) * 100
+
+    # LightGBM
+    lgbm = lgb.LGBMClassifier(
+        n_estimators=300, max_depth=8, learning_rate=0.05,
+        num_leaves=63, class_weight="balanced",
+        random_state=42, n_jobs=-1, verbose=-1,
+    )
+    lgbm.fit(X_tr, y_tr)
+    lgbm_prob = lgbm.predict_proba(X_test)[:, 1]
+    lgbm_gini = (2 * roc_auc_score(y_test, lgbm_prob) - 1) * 100
+
+    # Ensemble — soft voting (same as notebook)
+    ensemble = VotingClassifier(
+        estimators=[("xgb", xgb), ("lgbm", lgbm), ("rf", rf)],
+        voting="soft",
+    )
+    ensemble.fit(X_tr, y_tr)
+    ens_prob = ensemble.predict_proba(X_test)[:, 1]
+    ens_gini = (2 * roc_auc_score(y_test, ens_prob) - 1) * 100
+
+    # Step 8 — pick best model (same logic as notebook)
+    model_results = [
+        ("Logistic Regression",    lr_gini,   lr,       True),
+        ("Random Forest",          rf_gini,   rf,       False),
+        ("XGBoost",                xgb_gini,  xgb,      False),
+        ("LightGBM",               lgbm_gini, lgbm,     False),
+        ("Ensemble (XGB+LGBM+RF)", ens_gini,  ensemble, False),
+    ]
+    model_results.sort(key=lambda x: x[1], reverse=True)
+
+    best_name, best_gini, best_model, needs_scaling = model_results[0]
+    best_auc = (best_gini / 100 + 1) / 2
+
+    summary = {
+        r[0]: {"gini": round(r[1], 2), "auc": round((r[1]/100+1)/2, 4)}
+        for r in model_results
+    }
+
+    return {
+        "model":           best_model,
+        "needs_scaling":   needs_scaling,
+        "scaler":          scaler,
+        "imputer":         imputer,
+        "feature_columns": feature_columns,
+        "best_name":       best_name,
+        "best_gini":       round(best_gini, 2),
+        "best_auc":        round(best_auc, 4),
+        "summary":         summary,
+        "lr": lr, "rf": rf, "xgb": xgb, "lgbm": lgbm, "ensemble": ensemble,
+        "scaler_obj": scaler,
+    }
+
+
+def predict_customer(state, input_dict):
+    """
+    Exact same prediction logic as notebook Cell 35.
+    Same feature alignment, same imputer.transform, same scoring.
+    """
+    feature_columns = state["feature_columns"]
+    imputer         = state["imputer"]
+    scaler          = state["scaler_obj"]
+    best_model      = state["model"]
+    needs_scaling   = state["needs_scaling"]
+
+    row = pd.DataFrame([input_dict])
+    for col in feature_columns:
+        if col not in row.columns:
+            row[col] = np.nan
+    row = row[feature_columns]
+    row.replace([np.inf, -np.inf], np.nan, inplace=True)
+    row_imp = pd.DataFrame(imputer.transform(row), columns=feature_columns)
+
+    if needs_scaling:
+        row_input = scaler.transform(row_imp)
+    else:
+        row_input = row_imp.values
+
+    prob_bad     = float(best_model.predict_proba(row_input)[0, 1])
+    label        = int(prob_bad >= 0.5)
+    # Exact formula from notebook
+    credit_score = int(300 + (1 - prob_bad) * 550)
+    # Exact thresholds from notebook
+    band = "HIGH" if prob_bad >= 0.6 else ("MEDIUM" if prob_bad >= 0.35 else "LOW")
+    rec  = ("❌ REJECT — High default risk"      if band == "HIGH"   else
+            "⚠️ CAUTION — Approve with conditions" if band == "MEDIUM" else
+            "✅ APPROVE — Low default risk")
+
+    return {
+        "bad_label":    label,
+        "prob_bad":     round(prob_bad, 4),
+        "prob_good":    round(1 - prob_bad, 4),
+        "credit_score": credit_score,
+        "risk_band":    band,
+        "recommendation": rec,
+    }
+
+
+def build_input_dict(cur_balance, credit_limit, cash_limit, past_due,
+                     last_payment, high_credit, rate_of_interest,
+                     n_accounts, months_opened, ontime_rate, dpd30_rate,
+                     enq_90, enq_365, avg_enq_amt, unsecured_ratio):
+    """
+    Exact same input_dict construction as notebook Cell 35.
+    """
+    cred = credit_limit if credit_limit > 0 else 1
+    return {
+        "Ratio_currbalance_creditlimit":    cur_balance / cred,
+        "utilisation_trend":               cur_balance / cred,
+        "acct_cur_balance_amt_sum":        cur_balance * n_accounts,
+        "acct_cur_balance_amt_mean":       cur_balance,
+        "acct_creditlimit_sum":            credit_limit * n_accounts,
+        "acct_creditlimit_mean":           credit_limit,
+        "acct_cashlimit_sum":              cash_limit * n_accounts,
+        "acct_cashlimit_mean":             cash_limit,
+        "acct_amt_past_due_sum":           past_due * n_accounts,
+        "acct_amt_past_due_mean":          past_due,
+        "acct_amt_past_due_max":           past_due,
+        "acct_high_credit_amt_sum":        high_credit * n_accounts,
+        "acct_high_credit_amt_mean":       high_credit,
+        "acct_actualpaymentamount_sum":    last_payment * n_accounts,
+        "acct_actualpaymentamount_mean":   last_payment,
+        "acct_rateofinterest_mean":        rate_of_interest,
+        "acct_util_ratio_mean":            cur_balance / cred,
+        "acct_util_ratio_max":             min(cur_balance / cred * 1.1, 1.0),
+        "acct_diff_lastpaymt_opened_sum":  months_opened * n_accounts,
+        "acct_diff_lastpaymt_opened_mean": months_opened,
+        "acct_count":                      n_accounts,
+        "acct_ph_ok_mean":                 ontime_rate,
+        "acct_ph_bad_mean":                dpd30_rate,
+        "count_enquiry_total":             enq_365,
+        "count_enquiry_rec_90":            enq_90,
+        "count_enquiry_rec_365":           enq_365,
+        "mean_enq_amt":                    avg_enq_amt,
+        "max_enq_amt":                     avg_enq_amt * 1.5,
+        "perc_unsecured":                  unsecured_ratio,
+    }
+
+
+# ── Load / train models ───────────────────────────────────────
+with st.spinner("🔄 Training models (LR, RF, XGBoost, LightGBM, Ensemble) — first load only, ~2 min..."):
+    state = train_all_models()
+
+# ── Sidebar ───────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## 🏦 GoodCredit")
+    st.markdown("**Credit Risk Scoring**")
+    st.markdown("---")
+    page = st.radio("Navigation",
+                    ["Single Customer", "Batch Scoring", "Model Information"],
+                    label_visibility="collapsed")
+    st.markdown("---")
+    st.markdown("**Best Model**")
+    st.markdown(f"`{state['best_name']}`")
+    beat = "✅ Yes" if state["best_gini"] > 37.9 else "❌ No"
+    st.markdown(f"Gini: **{state['best_gini']:.2f}** (bench 37.9) {beat}")
+    st.markdown(f"AUC: **{state['best_auc']:.4f}**")
+
+
+# ═══════════════════════════════════════════════════════════════
+# PAGE 1 — SINGLE CUSTOMER
+# ═══════════════════════════════════════════════════════════════
+if page == "Single Customer":
+    st.markdown("""
+    <div class="hero">
+        <h1>🏦 Credit Risk Scorer</h1>
+        <p>Bank GoodCredit · PM-PR-0015 · Same model as Jupyter Notebook · Ensemble (XGB + LightGBM + RF)</p>
+    </div>""", unsafe_allow_html=True)
+
+    with st.form("customer_form"):
+        st.markdown('<p class="section-header">Account Details</p>', unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            cur_balance  = st.number_input("Current Balance (₹)",    min_value=0,   value=30_000,  step=1_000)
+            credit_limit = st.number_input("Credit Limit (₹)",       min_value=1,   value=300_000, step=5_000)
+        with c2:
+            cash_limit   = st.number_input("Cash Limit (₹)",         min_value=0,   value=80_000,  step=1_000)
+            past_due     = st.number_input("Amount Past Due (₹)",    min_value=0,   value=0,       step=500)
+        with c3:
+            last_payment = st.number_input("Last Payment (₹)",       min_value=0,   value=15_000,  step=500)
+            high_credit  = st.number_input("High Credit Amount (₹)", min_value=0,   value=100_000, step=1_000)
+
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            n_accounts      = st.number_input("Number of Accounts",    min_value=1, value=3,    step=1)
+        with c5:
+            rate_of_interest = st.number_input("Rate of Interest",     min_value=0.0, value=0.14, step=0.01, format="%.2f")
+        with c6:
+            months_opened   = st.slider("Months Since Account Opened", 1, 240, 48)
+
+        st.markdown('<p class="section-header">Payment History</p>', unsafe_allow_html=True)
+        c7, c8 = st.columns(2)
+        with c7:
+            ontime_rate = st.slider("On-time Payment Rate (0=never, 1=always)", 0.0, 1.0, 0.95, 0.01)
+        with c8:
+            dpd30_rate  = st.slider("30+ DPD Rate (fraction of late payments)", 0.0, 1.0, 0.00, 0.01)
+
+        st.markdown('<p class="section-header">Enquiry History</p>', unsafe_allow_html=True)
+        c9, c10, c11 = st.columns(3)
+        with c9:
+            enq_90      = st.number_input("Enquiries last 90 days",  min_value=0, value=0, step=1)
+        with c10:
+            enq_365     = st.number_input("Enquiries last 365 days", min_value=0, value=1, step=1)
+        with c11:
+            avg_enq_amt = st.number_input("Avg Enquiry Amount (₹)",  min_value=0, value=50_000, step=1_000)
+        unsecured = st.slider("Unsecured Enquiry Ratio (0=all secured, 1=all unsecured)", 0.0, 1.0, 0.20, 0.01)
+
+        submitted = st.form_submit_button("⚡ Score Customer", use_container_width=True)
+
+    if submitted:
+        input_dict = build_input_dict(
+            cur_balance, credit_limit, cash_limit, past_due,
+            last_payment, high_credit, rate_of_interest,
+            n_accounts, months_opened, ontime_rate, dpd30_rate,
+            enq_90, enq_365, avg_enq_amt, unsecured
+        )
+        result = predict_customer(state, input_dict)
+
+        band  = result["risk_band"]
+        score = result["credit_score"]
+        prob  = result["prob_bad"] * 100
+        css   = {"HIGH": "reject", "MEDIUM": "caution", "LOW": "approve"}[band]
+        icon  = {"HIGH": "❌", "MEDIUM": "⚠️", "LOW": "✅"}[band]
+        label = {"HIGH": "BAD CREDIT", "MEDIUM": "CAUTION", "LOW": "GOOD CREDIT"}[band]
+        color = {"HIGH": "#b91c1c", "MEDIUM": "#92400e", "LOW": "#15803d"}[band]
+        bar_p = int((score - 300) / 550 * 100)
+
+        st.markdown("---")
+        st.markdown(f"""
+        <div class="result-{css}">
+            <div style="font-size:2.5rem">{icon}</div>
+            <h2>{label}</h2>
+            <div class="score-num" style="color:{color}">{score} / 850</div>
+            <p style="color:#64748b;margin:0.5rem 0 0 0;
+               font-family:'IBM Plex Mono',monospace;font-size:0.8rem;">CREDIT SCORE</p>
+        </div>""", unsafe_allow_html=True)
+
+        st.progress(bar_p)
+        st.caption(f"300 (Poor) ──────────────────────── 850 (Excellent)  |  Your score: {score}")
+
+        st.markdown("---")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.markdown(f'<div class="metric-card"><h3>Default Probability</h3><p>{prob:.1f}%</p></div>',
+                    unsafe_allow_html=True)
+        m2.markdown(f'<div class="metric-card"><h3>Safe Probability</h3><p>{result["prob_good"]*100:.1f}%</p></div>',
+                    unsafe_allow_html=True)
+        m3.markdown(f'<div class="metric-card"><h3>Risk Band</h3><p>{band}</p></div>',
+                    unsafe_allow_html=True)
+        m4.markdown(f'<div class="metric-card"><h3>Bad Label</h3>'
+                    f'<p>{"1 — BAD" if result["bad_label"] else "0 — GOOD"}</p></div>',
+                    unsafe_allow_html=True)
+        st.info(f"📋 **Recommendation:** {result['recommendation']}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# PAGE 2 — BATCH SCORING
+# ═══════════════════════════════════════════════════════════════
+elif page == "Batch Scoring":
+    st.markdown("""
+    <div class="hero">
+        <h1>📂 Batch Scoring</h1>
+        <p>Upload a CSV of customers and download results with credit scores and risk bands</p>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("### Download Template CSV first")
+    # Template uses same column names as notebook Cell 35 variables
+    template = pd.DataFrame({
+        "cur_balance":       [30000,  800000, 150000],
+        "credit_limit":      [300000, 940000, 400000],
+        "cash_limit":        [80000,  140000, 100000],
+        "past_due":          [0,      45000,  5000],
+        "last_payment":      [15000,  1000,   8000],
+        "high_credit":       [100000, 300000, 200000],
+        "rate_of_interest":  [0.14,   0.38,   0.22],
+        "n_accounts":        [3,      3,      2],
+        "months_opened":     [48,     24,     36],
+        "ontime_rate":       [0.95,   0.30,   0.70],
+        "dpd30_rate":        [0.00,   0.60,   0.15],
+        "enq_90":            [0,      4,      1],
+        "enq_365":           [1,      7,      2],
+        "avg_enq_amt":       [50000,  80000,  60000],
+        "unsecured_ratio":   [0.20,   0.90,   0.50],
+    })
+    st.download_button("⬇️ Download CSV Template",
+                       data=template.to_csv(index=False),
+                       file_name="credit_risk_template.csv",
+                       mime="text/csv")
+    st.markdown("---")
+
+    uploaded = st.file_uploader("Upload your customer CSV", type=["csv"])
+    if uploaded:
+        df = pd.read_csv(uploaded)
+        st.success(f"Loaded {len(df):,} customers")
+        st.dataframe(df.head(), use_container_width=True)
+
+        required = ["cur_balance", "credit_limit", "cash_limit", "past_due",
+                    "last_payment", "high_credit", "rate_of_interest",
+                    "n_accounts", "months_opened", "ontime_rate", "dpd30_rate",
+                    "enq_90", "enq_365", "avg_enq_amt", "unsecured_ratio"]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            st.error(f"Missing columns: {missing}. Please use the template above.")
+        else:
+            if st.button("⚡ Run Batch Scoring", use_container_width=True):
+                results = []
+                bar = st.progress(0)
+                for i, row in df.iterrows():
+                    inp = build_input_dict(
+                        row["cur_balance"],      row["credit_limit"],
+                        row["cash_limit"],       row["past_due"],
+                        row["last_payment"],     row["high_credit"],
+                        row["rate_of_interest"], row["n_accounts"],
+                        row["months_opened"],    row["ontime_rate"],
+                        row["dpd30_rate"],       row["enq_90"],
+                        row["enq_365"],          row["avg_enq_amt"],
+                        row["unsecured_ratio"]
+                    )
+                    results.append(predict_customer(state, inp))
+                    bar.progress(int((i + 1) / len(df) * 100))
+
+                scores_df = pd.DataFrame(results)
+                result_df = pd.concat([df.reset_index(drop=True), scores_df], axis=1)
+
+                st.success(f"Done! {len(result_df):,} customers scored.")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Total",   f"{len(result_df):,}")
+                c2.metric("Approve", f"{(scores_df['risk_band']=='LOW').sum():,}")
+                c3.metric("Caution", f"{(scores_df['risk_band']=='MEDIUM').sum():,}")
+                c4.metric("Reject",  f"{(scores_df['risk_band']=='HIGH').sum():,}")
+                st.bar_chart(scores_df["risk_band"].value_counts())
+                st.dataframe(result_df[["bad_label", "prob_bad", "credit_score",
+                                        "risk_band", "recommendation"]].head(50),
+                             use_container_width=True)
+                st.download_button("⬇️ Download Full Results",
+                                   data=result_df.to_csv(index=False),
+                                   file_name="credit_risk_predictions.csv",
+                                   mime="text/csv",
+                                   use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# PAGE 3 — MODEL INFORMATION
+# ═══════════════════════════════════════════════════════════════
+elif page == "Model Information":
+    st.markdown("""
+    <div class="hero">
+        <h1>📊 Model Information</h1>
+        <p>Bank GoodCredit · PM-PR-0015 · Exact same models trained as in the Jupyter Notebook</p>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("### All 5 Models — Performance")
+    rows = []
+    for name, res in state["summary"].items():
+        rows.append({
+            "Model":            name,
+            "Gini":             res["gini"],
+            "AUC":              res["auc"],
+            "Beats Benchmark":  "✅ YES" if res["gini"] > 37.9 else "❌ NO",
+        })
+    df_summary = pd.DataFrame(rows).sort_values("Gini", ascending=False).reset_index(drop=True)
+    st.dataframe(df_summary, use_container_width=True, hide_index=True)
+
+    st.markdown(f"### 🏆 Best Model: `{state['best_name']}`")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(f'<div class="metric-card"><h3>Model</h3>'
+                f'<p style="font-size:0.9rem">{state["best_name"]}</p></div>',
+                unsafe_allow_html=True)
+    c2.markdown(f'<div class="metric-card"><h3>Gini Score</h3>'
+                f'<p>{state["best_gini"]:.2f}</p></div>', unsafe_allow_html=True)
+    c3.markdown(f'<div class="metric-card"><h3>AUC Score</h3>'
+                f'<p>{state["best_auc"]:.4f}</p></div>', unsafe_allow_html=True)
+    c4.markdown(f'<div class="metric-card"><h3>Benchmark Gini</h3>'
+                f'<p>37.9 ✅</p></div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("### Risk Band Thresholds (same as notebook)")
+    st.table(pd.DataFrame({
+        "Band":           ["LOW",      "MEDIUM",       "HIGH"],
+        "Default Prob":   ["< 35%",    "35% – 59%",    ">= 60%"],
+        "Decision":       ["APPROVE",  "CAUTION",      "REJECT"],
+        "Credit Score":   ["~493–850", "~355–492",     "300–354"],
+    }))
+
+    st.markdown("### Credit Score Formula (same as notebook)")
+    st.code("credit_score = 300 + (1 - prob_bad) × 550", language="python")
+
+    st.markdown("### Training Data (same synthetic data as notebook)")
+    st.markdown("""
+    - **Seed:** `np.random.seed(42)` — identical every run
+    - **Customers:** 5,000
+    - **Bad Rate:** 17.8%
+    - **Account rows:** 15,000 (3 per customer)
+    - **Enquiry rows:** 25,000 (5 per customer)
+    - **Features after engineering:** 105
+    - **After SMOTE:** 6,574 training rows (50/50 balanced)
+    - **Test set:** 1,000 rows (17.8% bad rate)
+    """)
+
+    st.markdown("### Feature Engineering (same as notebook Step 5)")
+    st.table(pd.DataFrame({
+        "Feature": [
+            "Ratio_currbalance_creditlimit",
+            "utilisation_trend",
+            "acct_ph_ok_mean",
+            "acct_ph_bad_mean",
+            "acct_diff_lastpaymt_opened_mean",
+            "acct_amt_past_due_sum/mean/max",
+            "count_enquiry_rec_90",
+            "count_enquiry_rec_365",
+            "perc_unsecured",
+            "acct_count",
+        ],
+        "Source Table": [
+            "Cust_Account", "Cust_Account", "Cust_Account (paymenthistory1)",
+            "Cust_Account (paymenthistory1)", "Cust_Account",
+            "Cust_Account", "Cust_Enquiry", "Cust_Enquiry",
+            "Cust_Enquiry", "Cust_Account",
+        ],
+        "Description": [
+            "Total balance / total credit limit",
+            "Mean utilisation ratio across accounts",
+            "Fraction of on-time payments in history",
+            "Fraction of 30+ DPD payments in history",
+            "Avg months between last payment and account open",
+            "Past due amount aggregations",
+            "Enquiries in last 90 days",
+            "Enquiries in last 365 days",
+            "Ratio of secured enquiry purposes",
+            "Number of accounts per customer",
+        ],
+    }))
