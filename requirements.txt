@@ -1,4 +1,7 @@
 numpy
 pandas
 scikit-learn
+xgboost
+lightgbm
+imbalanced-learn
 streamlit
