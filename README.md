@@ -9,7 +9,7 @@
 ![Streamlit](https://img.shields.io/badge/Deployed-Streamlit-ff4b4b?style=for-the-badge&logo=streamlit)
 ![Status](https://img.shields.io/badge/Status-Complete-brightgreen?style=for-the-badge)
 
-## [Click Here to Try the Live App](https://credit-risk-model-sa6lrta9dysc9kdwsqegqx.streamlit.app)
+## 🚀 [Click Here to Try the Live App](https://credit-risk-model-sa6lrta9dysc9kdwsqegqx.streamlit.app)
 
 *End-to-end credit risk model — data loading → EDA → feature engineering → 5 ML models → evaluation → live scoring app.*
 
